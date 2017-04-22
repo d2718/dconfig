@@ -1,7 +1,11 @@
 // Package dconfig assists in reading configuration files with the
 // common OPTION=VALUE format.
 //
-// Updated 2016-10-31
+// Updated 2017-04-22
+//
+// IMPORTANT NOTE: The 2017-04-22 update changed the package's method of
+// operation and the format of the API function calls, breaking all programs
+// written before then. I'm sorry for your loss, but it works better now.
 //
 package dconfig
 
@@ -45,10 +49,10 @@ const disallowed_str_opts   uint8 = UNSIGNED
 const disallowed_int_opts   uint8 = STRIP | UPPER | LOWER
 const disallowed_float_opts uint8 = STRIP | UPPER | LOWER
 
-var str_map      map[string]string
-var int_map      map[string]int
-var float_map    map[string]float64
-var bool_map     map[string]bool
+var str_map      map[string]*string
+var int_map      map[string]*int
+var float_map    map[string]*float64
+var bool_map     map[string]*bool
 var option_flags map[string]uint8
 
 var comment_re   *regexp.Regexp
@@ -61,8 +65,6 @@ var ufloat_token *regexp.Regexp
 
 var boolean_trues  [6]string = [6]string{"1", "t", "true", "y", "yes", "+"}
 var boolean_falses [7]string = [7]string{"0", "f", "false", "n", "no", "-", "nil"}
-
-var has_initialized bool = false
 
 // Return true if value val has the bit for attribute attrib set.
 //
@@ -108,25 +110,21 @@ func sumOfBits(bmask uint8) uint8 {
     return sum
 }
 
-// This is called when the first AddXxx() function is called in order
-// to initialze global variables and required state.
+// Reset() clears all the configured options.
+// If a package your program uses ALSO uses package dconfig, and they have one
+// or more identical keys, this could cause weird behavior. To avoid this,
+// your program should
+// * call dconfig.Reset()
+// * configure all options with the dconfig.AddXxx() functions
+// * call dconfig.Configure()
+// without doing anything else in between.
 //
-func initPackage() {
-    str_map = make(map[string]string)
-    int_map = make(map[string]int)
-    float_map = make(map[string]float64)
-    bool_map = make(map[string]bool)
+func Reset() {
+    str_map = make(map[string]*string)
+    int_map = make(map[string]*int)
+    float_map = make(map[string]*float64)
+    bool_map = make(map[string]*bool)
     option_flags = make(map[string]uint8)
-    
-    comment_re = regexp.MustCompile(`^\s*#`)
-    nonblank_re = regexp.MustCompile(`\S`)
-    option_re = regexp.MustCompile(`^\s*([^:=]+)=(.*)$`)
-    int_token = regexp.MustCompile(`-?\d+`)
-    uint_token = regexp.MustCompile(`\d+`)
-    float_token = regexp.MustCompile(`-?[0-9.]+`)
-    ufloat_token = regexp.MustCompile(`[0-9.]+`)
-    
-    has_initialized = true
 }
 
 // OptionType() returns the type of value associated with a given option
@@ -165,12 +163,9 @@ func optionExists(opt string) bool {
 // It can take the NONE flag, or the UNSIGNED flag (in which case any
 // leading minus signs will be ignored when converting into an int).
 //
-func AddInt(name string, def int, flags uint8) error {
+func AddInt(target *int, name string, flags uint8) error {
     if flags & disallowed_int_opts != 0 {
         return errors.New("unsupported flag for integer option type")
-    }
-    if !has_initialized {
-        initPackage()
     }
     
     uname := strings.ToUpper(name)
@@ -178,7 +173,7 @@ func AddInt(name string, def int, flags uint8) error {
         return errors.New(fmt.Sprintf("\"%s\" option already exists", uname))
     }
     
-    int_map[uname] = def
+    int_map[uname] = target
     option_flags[uname] = flags | INT
     
     return nil
@@ -194,20 +189,17 @@ func AddInt(name string, def int, flags uint8) error {
 //
 // Don't use the last two together.
 //
-func AddString(name string, def string, flags uint8) error {
+func AddString(target *string, name string, flags uint8) error {
     if flags & disallowed_str_opts != 0 {
         return errors.New("unsupported flag for string option type")
     }
-    if !has_initialized {
-        initPackage()
-    }
-    
+
     uname := strings.ToUpper(name)
     if optionExists(uname) {
         return errors.New(fmt.Sprintf("\"%s\" option already exists", uname))
     }
     
-    str_map[uname] = def
+    str_map[uname] = target
     option_flags[uname] = flags | STRING
     
     return nil
@@ -219,20 +211,17 @@ func AddString(name string, def string, flags uint8) error {
 // It can take the NONE flag, or the UNSIGNED flag (in which case any
 // leading minus sign will be ignored when converting into a float).
 //
-func AddFloat(name string, def float64, flags uint8) error {
+func AddFloat(target *float64, name string, flags uint8) error {
     if flags & disallowed_float_opts != 0 {
         return errors.New("unsupported flag for float option type")
     }
-    if !has_initialized {
-        initPackage()
-    }
-    
+
     uname := strings.ToUpper(name)
     if optionExists(uname) {
         return errors.New(fmt.Sprintf("\"%s\" option already exists", uname))
     }
     
-    float_map[uname] = def
+    float_map[uname] = target
     option_flags[uname] = flags | FLOAT
     
     return nil
@@ -241,17 +230,13 @@ func AddFloat(name string, def float64, flags uint8) error {
 // Adds an option that will be parsed as a boolean when read from the
 // configuration file. Accepts many varieties of true/false representations.
 //
-func AddBool(name string, def bool) error {
-    if !has_initialized {
-        initPackage()
-    }
-    
+func AddBool(target *bool, name string) error {
     uname := strings.ToUpper(name)
     if optionExists(uname) {
         return errors.New(fmt.Sprintf("\"%s\" option already exists", uname))
     }
     
-    bool_map[uname] = def
+    bool_map[uname] = target
     option_flags[uname] = BOOL
     
     return nil
@@ -281,7 +266,7 @@ func setOption(name, value string, verbose bool) error {
         } else if hasAttr(flags, UPPER) {
             value = strings.ToUpper(value)
         }
-        str_map[uname] = value
+        *(str_map[uname]) = value
         return nil
         
     } else if hasAttr(flags, INT) {
@@ -298,7 +283,7 @@ func setOption(name, value string, verbose bool) error {
             }
             return errors.New(err_str)
         }
-        int_map[uname] = iv
+        *(int_map[uname]) = iv
         return nil
         
     } else if hasAttr(flags, FLOAT) {
@@ -315,7 +300,7 @@ func setOption(name, value string, verbose bool) error {
             }
             return errors.New(err_str)
         }
-        float_map[uname] = fv
+        *(float_map[uname]) = fv
         return nil
         
     } else if hasAttr(flags, BOOL) {
@@ -323,13 +308,13 @@ func setOption(name, value string, verbose bool) error {
         value = strings.ToLower(value)
         for _, t := range boolean_trues {
             if value == t {
-                bool_map[uname] = true
+                *(bool_map[uname]) = true
                 return nil
             }
         }
         for _, f := range boolean_falses {
             if value == f {
-                bool_map[uname] = false
+                *(bool_map[uname]) = false
                 return nil
             }
         }
@@ -349,18 +334,14 @@ func setOption(name, value string, verbose bool) error {
     }
 }
 
-// Configure() reads a configuration file, updating the default values
-// of any specified options to those found in the configuration file.
+// Configure() reads a configuration file, setting the values of any
+// configured variables to those found in the configuration file.
 // The files argument is a slice of paths to possible configuration
 // files; Configure() seeks them in order and processes the first one
 // it finds. The verbose argument controls whether processing errors
 // are written to stdout.
 //
-func Configure(files []string, verbose bool) error {
-    if !has_initialized {
-        return errors.New("no configuration options added")
-    }
-    
+func Configure(files []string, verbose bool) error {   
     var cfg_file string
     for _, fname := range files {
         if _, err := os.Stat(fname); err == nil {
@@ -404,47 +385,14 @@ func Configure(files []string, verbose bool) error {
     return nil
 }
 
-// The four GetXxx() functions return the configured values for the
-// given option. The returned error value will be non-nil if the
-// option is not configured (or configured to be of a different type
-// of value.
-//
-func GetBool(opt string) (bool, error) {
-    uname := strings.ToUpper(opt)
-    r, exists := bool_map[uname]
-    if exists {
-        return r, nil
-    } else {
-        return r, errors.New(fmt.Sprintf("no option \"%s\"", uname))
-    }
-}
-
-func GetString(opt string) (string, error) {
-    uname := strings.ToUpper(opt)
-    r, exists := str_map[uname]
-    if exists {
-        return r, nil
-    } else {
-        return r, errors.New(fmt.Sprintf("no option \"%s\"", uname))
-    }
-}
-
-func GetInt(opt string) (int, error) {
-    uname := strings.ToUpper(opt)
-    r, exists := int_map[uname]
-    if exists {
-        return r, nil
-    } else {
-        return r, errors.New(fmt.Sprintf("no option \"%s\"", uname))
-    }
-}
-
-func GetFloat(opt string) (float64, error) {
-    uname := strings.ToUpper(opt)
-    r, exists := float_map[uname]
-    if exists {
-        return r, nil
-    } else {
-        return r, errors.New(fmt.Sprintf("no option \"%s\"", uname))
-    }
+func init() {
+    comment_re = regexp.MustCompile(`^\s*#`)
+    nonblank_re = regexp.MustCompile(`\S`)
+    option_re = regexp.MustCompile(`^\s*([^:=]+)=(.*)$`)
+    int_token = regexp.MustCompile(`-?\d+`)
+    uint_token = regexp.MustCompile(`\d+`)
+    float_token = regexp.MustCompile(`-?[0-9.]+`)
+    ufloat_token = regexp.MustCompile(`[0-9.]+`)
+    
+    Reset()
 }
